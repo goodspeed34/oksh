@@ -37,6 +37,11 @@
 #include "sh.h"
 #include "edit.h"
 
+#ifndef SMALL
+#include "unicode.h"
+#else
+#define x_size_rev x_size
+#endif
 static	Area	aedit;
 #define	AEDIT	&aedit		/* area for kill ring and macro defns */
 
@@ -134,6 +139,7 @@ static int	x_fword(void);
 static void	x_goto(char *);
 static void	x_bs(int);
 static int	x_size_str(char *);
+static int	x_size_rev(int);
 static int	x_size(int);
 static void	x_zots(char *);
 static void	x_zotc(int);
@@ -467,7 +473,7 @@ x_ins(char *s)
 	if (adj == x_adj_done) {	/* has x_adjust() been called? */
 		/* no */
 		for (cp = xlp; cp > xcp; )
-			x_bs(*--cp);
+			x_bs((unsigned char)*--cp);
 	}
 
 	x_adj_ok = 1;
@@ -661,7 +667,7 @@ x_bs(int c)
 {
 	int i;
 
-	i = x_size(c);
+	i = x_size_rev(c);
 	while (i--)
 		x_e_putc('\b');
 }
@@ -671,20 +677,94 @@ x_size_str(char *cp)
 {
 	int size = 0;
 	while (*cp)
-		size += x_size(*cp++);
+		size += x_size((unsigned char)*cp++);
 	return size;
 }
 
+#ifndef SMALL
 static int
-x_size(int c)
+x_size_rev(int c)
 {
+	static unsigned char ch[5] = { 0 };
+	static int cnt = 3;
+	unsigned long cpt;
+	int w;
+
 	if (c=='\t')
 		return 4;	/* Kludge, tabs are always four spaces. */
 	if (iscntrl(c))		/* control char */
 		return 2;
-	if (isu8cont(c))
-		return 0;
-	return 1;
+
+	if (!isu8cont(c)) {
+		if (c <= 0x7f) {
+			cnt = 3;
+			return 1;
+		}
+
+		ch[cnt] = c;
+		u8_to_cpt(ch + cnt, &cpt);
+		w = is_fullwidth(cpt) ? 2 : 1;
+
+		cnt = 3;
+		memset(ch, 0, 4);
+		return w;
+	} else {
+		if (cnt <= 0)
+			return 0;
+		ch[cnt] = c;
+		cnt--;
+	}
+
+	return 0;
+}
+#endif
+
+static int
+x_size(int c)
+{
+#ifndef SMALL
+	static unsigned char ch[5] = { 0 };
+	static int len = 0, cnt = 0;
+	unsigned long cpt;
+#endif
+	if (c=='\t')
+		return 4;	/* Kludge, tabs are always four spaces. */
+	if (iscntrl(c))		/* control char */
+		return 2;
+#ifdef SMALL
+  	if (isu8cont(c))
+  		return 0;
+  	return 1;
+#else
+	if (!isu8cont(c)) {
+		if (c <= 0x7f) {
+			len = 0;
+			return 1;
+		}
+
+		if ((c & 0xf8) == 0xf0 && c < 0xf5)
+			len = 3;
+		else if ((c & 0xf0) == 0xe0)
+			len = 2;
+		else if ((c & 0xe0) == 0xc0 && c > 0xc1)
+			len = 1;
+		else {
+			len = 0;
+			return 0;
+		}
+
+		cnt = 0;
+		memset(ch, 0, 5);
+		ch[cnt++] = c;
+	} else {
+		ch[cnt++] = c;
+		if (cnt > len) {
+			u8_to_cpt(ch, &cpt);
+			return is_fullwidth(cpt) ? 2 : 1;
+		}
+	}
+	return 0;
+#endif
 }
 
 static void
@@ -1107,6 +1187,8 @@ static int
 x_transpose(int c)
 {
 	char	tmp;
+	char	rune1[4], rune2[4];
+	char	*p1, *p2, *p;
 
 	/* What transpose is meant to do seems to be up for debate. This
 	 * is a general summary of the options; the text is abcd with the
@@ -1132,25 +1214,55 @@ x_transpose(int c)
 		/* Gosling/Unipress emacs style: Swap two characters before the
 		 * cursor, do not change cursor position
 		 */
-		x_bs(xcp[-1]);
-		x_bs(xcp[-2]);
-		x_zotc(xcp[-1]);
-		x_zotc(xcp[-2]);
-		tmp = xcp[-1];
-		xcp[-1] = xcp[-2];
-		xcp[-2] = tmp;
+		p1 = xcp;
+		do {
+			x_bs((unsigned char) *--p1);
+		} while (xbuf < p1 && (xcp - p1) < 5 && isu8cont(*p1));
+
+		if (p1 == xbuf) {
+			x_e_putc(BEL);
+			return KSTD;
+		}
+
+		p2 = p1;
+		do {
+			x_bs((unsigned char) *--p2);
+		} while   (xbuf <= p2 && (p1 - p2) < 5 && isu8cont(*p2));
+
+		for (p = p1; p < xcp; p++)
+			x_zotc(*p);
+		for (p = p2; p < p1; p++)
+			x_zotc(*p);
+
+		memcpy(rune1, p1, xcp - p1);
+		memcpy(rune2, p2, p1 - p2);
+		memcpy(p2, rune1, xcp - p1);
+		memcpy(p2 + (xcp - p1), rune2, p1 - p2);
 	} else {
 		/* GNU emacs style: Swap the characters before and under the
 		 * cursor, move cursor position along one.
 		 */
-		x_bs(xcp[-1]);
-		x_zotc(xcp[0]);
-		x_zotc(xcp[-1]);
-		tmp = xcp[-1];
-		xcp[-1] = xcp[0];
-		xcp[0] = tmp;
-		x_bs(xcp[0]);
-		x_goto(xcp + 1);
+		p1 = xcp + 1;
+		while (p1 < xep && *p1 && (p1 - xcp) <= 5 && isu8cont(*p1))
+			p1++;
+
+		p2 = xcp;
+		do {
+			x_bs((unsigned char) *--p2);
+		} while (xbuf <= p2 && (xcp - p2) < 5 && isu8cont(*p2));
+
+		for (p = xcp; p < p1; p++)
+			x_zotc(*p);
+		for (p = p2; p < xcp; p++)
+			x_zotc(*p);
+
+		memcpy(rune1, xcp, p1 - xcp);
+		memcpy(rune2, p2, xcp - p2);
+		memcpy(p2, rune1, p1 - xcp);
+		memcpy(p2 + (p1 - xcp), rune2, xcp - p2);
+
+		xcp = p1;
+		x_goto(p1);
 	}
 	return KSTD;
 }
@@ -1812,6 +1924,11 @@ x_adjust(void)
 	 */
 	if ((xbp = xcp - (x_displen / 2)) < xbuf)
 		xbp = xbuf;
+	else {
+		/* rewind to the last valid codepoint */
+		while (xbp > xbuf && isu8cont((unsigned char) *xbp))
+			xbp--;
+	}
 	xlp_valid = false;
 	x_redraw(xx_cols);
 	x_flush();
@@ -1890,8 +2007,16 @@ x_e_getu8(char *buf, int off)
 }
 
 static void
-x_e_putc(int c)
+x_e_putc(int sc)
 {
+#ifndef SMALL
+	static unsigned char ch[5] = { 0 };
+	static int len = 0, cnt = 0;
+	unsigned long cpt;
+#endif
+	unsigned char c;
+
+	c = sc;
 	if (c == '\r' || c == '\n')
 		x_col = 0;
 	if (x_col < xx_cols) {
@@ -1906,9 +2031,43 @@ x_e_putc(int c)
 			x_col--;
 			break;
 		default:
+#ifdef SMALL
 			if (!isu8cont(c))
 				x_col++;
 			break;
+#else
+			if (!isu8cont(c)) {
+				if (c <= 0x7f) {
+					x_col++;
+					len = 0;
+					break;
+				}
+
+				if ((c & 0xf8) == 0xf0 && c < 0xf5)
+					len = 3;
+				else if ((c & 0xf0) == 0xe0)
+					len = 2;
+				else if ((c & 0xe0) == 0xc0 && c > 0xc1)
+					len = 1;
+				else {
+					len = 0;
+					break;
+				}
+
+				cnt = 0;
+				memset(ch, 0, 5);
+				ch[cnt++] = c;
+			} else {
+				ch[cnt++] = c;
+				if (cnt > len) {
+					x_col++;
+					u8_to_cpt(ch, &cpt);
+					if (is_fullwidth(cpt))
+						x_col++;
+				}
+			}
+			break;
+#endif
 		}
 	}
 	if (x_adj_ok && (x_col < 0 || x_col >= (xx_cols - 2)))
