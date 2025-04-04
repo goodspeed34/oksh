@@ -687,7 +687,6 @@ x_size_rev(int c)
 {
 	static unsigned char ch[5] = { 0 };
 	static int cnt = 3;
-	unsigned long cpt;
 	int w;
 
 	if (c=='\t')
@@ -702,8 +701,7 @@ x_size_rev(int c)
 		}
 
 		ch[cnt] = c;
-		u8_to_cpt(ch + cnt, &cpt);
-		w = is_fullwidth(cpt) ? 2 : 1;
+		w = u8width(ch + cnt);
 
 		cnt = 3;
 		memset(ch, 0, 4);
@@ -725,7 +723,6 @@ x_size(int c)
 #ifndef SMALL
 	static unsigned char ch[5] = { 0 };
 	static int len = 0, cnt = 0;
-	unsigned long cpt;
 #endif
 	if (c=='\t')
 		return 4;	/* Kludge, tabs are always four spaces. */
@@ -758,10 +755,8 @@ x_size(int c)
 		ch[cnt++] = c;
 	} else {
 		ch[cnt++] = c;
-		if (cnt > len) {
-			u8_to_cpt(ch, &cpt);
-			return is_fullwidth(cpt) ? 2 : 1;
-		}
+		if (cnt > len)
+			return u8width(ch);
 	}
 	return 0;
 #endif
@@ -2012,7 +2007,6 @@ x_e_putc(int sc)
 #ifndef SMALL
 	static unsigned char ch[5] = { 0 };
 	static int len = 0, cnt = 0;
-	unsigned long cpt;
 #endif
 	unsigned char c;
 
@@ -2059,12 +2053,8 @@ x_e_putc(int sc)
 				ch[cnt++] = c;
 			} else {
 				ch[cnt++] = c;
-				if (cnt > len) {
-					x_col++;
-					u8_to_cpt(ch, &cpt);
-					if (is_fullwidth(cpt))
-						x_col++;
-				}
+				if (cnt > len)
+					x_col += u8width(ch);
 			}
 			break;
 #endif

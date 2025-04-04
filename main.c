@@ -15,6 +15,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef SMALL
+#include <locale.h>
+#endif
+
 #include "sh.h"
 
 extern char **environ;
@@ -152,6 +156,10 @@ main(int argc, char *argv[])
 	char **wp;
 	struct env env;
 	pid_t ppid;
+
+#ifndef SMALL
+	setlocale(LC_ALL, "");
+#endif
 
 	kshname = argv[0];
 
